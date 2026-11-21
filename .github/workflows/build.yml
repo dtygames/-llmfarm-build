@@ -44,6 +44,44 @@ jobs:
               raise SystemExit("App Shortcut phrase not found")
           PY
 
+      # 作者把 FineTune / Merge Lora 的界面入口注释掉了，但视图代码仍在工程里。
+      # 这里把入口重新接回设置页，让编译出的 App 能直接在手机上微调。
+      - name: Enable FineTune UI
+        run: |
+          set -euo pipefail
+          cat > /tmp/patch_ui.py <<'PYEOF'
+          import sys
+
+          def patch(path, old, new, label):
+              with open(path, encoding="utf-8") as f:
+                  s = f.read()
+              if old in s:
+                  s = s.replace(old, new, 1)
+                  print("OK:", label)
+              elif new in s:
+                  print("SKIP(already):", label)
+              else:
+                  print("FAIL:", label, "anchor not found", file=sys.stderr)
+                  sys.exit(1)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(s)
+
+          patch(
+              "LLMFarm/Settings/AppSettingsTabs.swift",
+              '            Spacer(minLength: 0)\n\n            TabButton(index: $index, targetIndex: 2, image: Image(systemName: "info.circle.fill"), text: "Info")',
+              '            TabButton(index: $index, targetIndex: 2, image: Image(systemName: "slider.horizontal.3"), text: "FineTune")\n            .padding(.top,15)\n\n            TabButton(index: $index, targetIndex: 3, image: Image(systemName: "arrow.triangle.merge"), text: "Merge Lora")\n            .padding(.top,15)\n\n            Spacer(minLength: 0)\n\n            TabButton(index: $index, targetIndex: 4, image: Image(systemName: "info.circle.fill"), text: "Info")',
+              "add FineTune + Merge Lora tabs",
+          )
+
+          patch(
+              "LLMFarm/Settings/AppSettingsView.swift",
+              '                    case 2:\n                        About()\n                        \n                    default:',
+              '                    case 2:\n                        FineTuneView().environmentObject(fineTuneModel)\n                    case 3:\n                        ExportLoraView().environmentObject(fineTuneModel)\n                    case 4:\n                        About()\n                        \n                    default:',
+              "wire FineTuneView + ExportLoraView",
+          )
+          PYEOF
+          python3 /tmp/patch_ui.py
+
       - run: |
           xcodebuild archive \
             -project LLMFarm.xcodeproj \
