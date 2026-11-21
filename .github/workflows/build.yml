@@ -10,6 +10,21 @@ jobs:
           repository: guinmoon/LLMFarm
           ref: main
           submodules: recursive
+      # 主仓库自带完整预编译库 llama_cpu.xcframework；llmfarm_core 的
+      # Package.swift 却指向空的 llama.cpp/build-apple/llama.xcframework，
+      # 这里把预编译库放到它期望的位置，避免昂贵的 C++ 源码编译。
+      - name: Prepare llama.xcframework
+        run: |
+          set -euo pipefail
+          SRC="llama_cpu.xcframework"
+          DST="llmfarm_core.swift/llama.cpp/build-apple/llama.xcframework"
+          echo "检查源框架: $SRC"
+          test -d "$SRC/ios-arm64/llama.framework" || { echo "::error::源框架缺失"; exit 1; }
+          mkdir -p "$(dirname "$DST")"
+          rm -rf "$DST"
+          cp -R "$SRC" "$DST"
+          echo "已准备 $DST"
+
       - run: |
           xcodebuild archive \
             -project LLMFarm.xcodeproj \
