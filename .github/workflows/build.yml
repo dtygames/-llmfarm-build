@@ -10,23 +10,17 @@ jobs:
           repository: guinmoon/LLMFarm
           ref: main
           submodules: recursive
-      # 主仓库自带完整预编译库 llama_cpu.xcframework；llmfarm_core 的
-      # Package.swift 却指向空的 llama.cpp/build-apple/llama.xcframework，
-      # 这里把预编译库放到它期望的位置，避免昂贵的 C++ 源码编译。
+      # 主仓库自带预编译库 llama_cpu.xcframework，复制到 SPM 期望的空路径，避免 C++ 源码编译。
       - name: Prepare llama.xcframework
         run: |
           set -euo pipefail
           SRC="llama_cpu.xcframework"
           DST="llmfarm_core.swift/llama.cpp/build-apple/llama.xcframework"
-          echo "检查源框架: $SRC"
           test -d "$SRC/ios-arm64/llama.framework" || { echo "::error::源框架缺失"; exit 1; }
           mkdir -p "$(dirname "$DST")"
           rm -rf "$DST"
           cp -R "$SRC" "$DST"
-          echo "已准备 $DST"
-
-      # Xcode 16 要求每个 App Shortcut 短语必须包含 \(.applicationName)，
-      # 老版本源码的 "Ask Local LLM" 缺少该占位符会导致元数据提取失败。
+      # Xcode 16 要求 App Shortcut 短语含 \(.applicationName)。
       - name: Fix App Shortcut utterance
         run: |
           set -euo pipefail
@@ -37,51 +31,69 @@ jobs:
           new = '"Ask Local LLM in \\(.applicationName)"'
           if old in s:
               open(p, "w", encoding="utf-8").write(s.replace(old, new))
-              print("patched App Shortcuts phrase")
+              print("patched")
           elif new in s:
               print("already patched")
           else:
               raise SystemExit("App Shortcut phrase not found")
           PY
-
-      # 作者把 FineTune / Merge Lora 的界面入口注释掉了，但视图代码仍在工程里。
-      # 这里把入口重新接回设置页，让编译出的 App 能直接在手机上微调。
+      # 作者注释掉了微调入口；重新接回设置页。
       - name: Enable FineTune UI
         run: |
           set -euo pipefail
           cat > /tmp/patch_ui.py <<'PYEOF'
           import sys
-
+          
           def patch(path, old, new, label):
-              with open(path, encoding="utf-8") as f:
-                  s = f.read()
+              s = open(path, encoding="utf-8").read()
               if old in s:
-                  s = s.replace(old, new, 1)
-                  print("OK:", label)
+                  s = s.replace(old, new, 1); print("OK:", label)
               elif new in s:
-                  print("SKIP(already):", label)
+                  print("SKIP:", label)
               else:
-                  print("FAIL:", label, "anchor not found", file=sys.stderr)
-                  sys.exit(1)
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(s)
-
-          patch(
-              "LLMFarm/Settings/AppSettingsTabs.swift",
-              '            Spacer(minLength: 0)\n\n            TabButton(index: $index, targetIndex: 2, image: Image(systemName: "info.circle.fill"), text: "Info")',
-              '            TabButton(index: $index, targetIndex: 2, image: Image(systemName: "slider.horizontal.3"), text: "FineTune")\n            .padding(.top,15)\n\n            TabButton(index: $index, targetIndex: 3, image: Image(systemName: "arrow.triangle.merge"), text: "Merge Lora")\n            .padding(.top,15)\n\n            Spacer(minLength: 0)\n\n            TabButton(index: $index, targetIndex: 4, image: Image(systemName: "info.circle.fill"), text: "Info")',
-              "add FineTune + Merge Lora tabs",
-          )
-
-          patch(
-              "LLMFarm/Settings/AppSettingsView.swift",
-              '                    case 2:\n                        About()\n                        \n                    default:',
-              '                    case 2:\n                        FineTuneView().environmentObject(fineTuneModel)\n                    case 3:\n                        ExportLoraView().environmentObject(fineTuneModel)\n                    case 4:\n                        About()\n                        \n                    default:',
-              "wire FineTuneView + ExportLoraView",
-          )
+                  print("FAIL:", label, file=sys.stderr); sys.exit(1)
+              open(path, "w", encoding="utf-8").write(s)
+          
+          patch("LLMFarm/Settings/AppSettingsTabs.swift",
+            '            Spacer(minLength: 0)\n\n            TabButton(index: $index, targetIndex: 2, image: Image(systemName: "info.circle.fill"), text: "Info")',
+            '            TabButton(index: $index, targetIndex: 2, image: Image(systemName: "slider.horizontal.3"), text: "FineTune")\n            .padding(.top,15)\n\n            TabButton(index: $index, targetIndex: 3, image: Image(systemName: "arrow.triangle.merge"), text: "Merge Lora")\n            .padding(.top,15)\n\n            Spacer(minLength: 0)\n\n            TabButton(index: $index, targetIndex: 4, image: Image(systemName: "info.circle.fill"), text: "Info")',
+            "add tabs")
+          
+          patch("LLMFarm/Settings/AppSettingsView.swift",
+            '                    case 2:\n                        About()\n                        \n                    default:',
+            '                    case 2:\n                        FineTuneView().environmentObject(fineTuneModel)\n                    case 3:\n                        ExportLoraView().environmentObject(fineTuneModel)\n                    case 4:\n                        About()\n                        \n                    default:',
+            "wire views")
           PYEOF
           python3 /tmp/patch_ui.py
-
+      # 数据集改为内置默认 + 应用内编辑器（侧载环境文件选择器不可用）。
+      - name: Embed default dataset + in-app dataset editor
+        run: |
+          set -euo pipefail
+          cat > /tmp/patch_all.py <<'PYEOF'
+          import sys
+          
+          def patch(path, old, new, label, marker):
+              s = open(path, encoding="utf-8").read()
+              if marker in s:
+                  print("SKIP(already):", label); return
+              cnt = s.count(old)
+              if cnt != 1:
+                  print("FAIL:", label, "anchor count =", cnt, file=sys.stderr); sys.exit(1)
+              open(path, "w", encoding="utf-8").write(s.replace(old, new, 1))
+              print("OK:", label)
+          
+          patch("LLMFarm/Lib/Helpers.swift",
+              '        let destinationURL = documentsPath!.appendingPathComponent(dir)\n        try fileManager.createDirectory (at: destinationURL, withIntermediateDirectories: true, attributes: nil)\n        let files = try fileManager.contentsOfDirectory(at: destinationURL',
+              '        let destinationURL = documentsPath!.appendingPathComponent(dir)\n        try fileManager.createDirectory (at: destinationURL, withIntermediateDirectories: true, attributes: nil)\n        // === BUILTIN DATASET ===\n        if dir == "datasets" {\n            let p = destinationURL.appendingPathComponent("finetune-dataset.txt").path\n            if !fileManager.fileExists(atPath: p) {\n                let lines = [\n                "用户:你好",\n                "助手:你好！有什么可以帮你的吗？",\n                "用户:你叫什么名字",\n                "助手:我是本地运行的人工智能助手。",\n                "用户:今天天气怎么样",\n                "助手:我无法获取实时天气，请查看天气应用。",\n                "用户:1加1等于几",\n                "助手:1加1等于2。",\n                "用户:用一句话介绍你自己",\n                "助手:我是一个运行在设备上的语言模型，可以回答你的问题。",\n                "用户:谢谢",\n                "助手:不客气，很高兴能帮到你。",\n                "用户:再见",\n                "助手:再见！随时欢迎再来找我。",\n                "用户:你能做什么",\n                "助手:我可以聊天、回答问题、帮你写作和整理信息。",\n                "用户:讲个笑话",\n                "助手:为什么程序员总是分不清万圣节和圣诞节？因为 Oct 31 等于 Dec 25。",\n                "用户:晚安",\n                "助手:晚安，好好休息！",\n                ]\n                try? (lines.joined(separator: "\\n") + "\\n").write(toFile: p, atomically: true, encoding: .utf8)\n            }\n        }\n        // === END BUILTIN DATASET ===\n        let files = try fileManager.contentsOfDirectory(at: destinationURL',
+              "embed default dataset", "// === BUILTIN DATASET ===")
+          p = 'LLMFarm/Tune/FineTuneView.swift'
+          patch(p, '    @State var datasets_preview = getFileListByExts(dir:"datasets",exts:[".txt"]) ?? []\n', '    @State var datasets_preview = getFileListByExts(dir:"datasets",exts:[".txt"]) ?? []\n    @State private var showDatasetEditor = false\n    @State private var datasetEditorName = "my-dataset.txt"\n    @State private var datasetEditorText = ""\n', "editor state", "@State private var showDatasetEditor")
+          patch(p, '                    Divider()\n                    \n                    Section("Avalible datasets") {\n', '                    Divider()\n\n                    Button {\n                        datasetEditorName = (fineTuneModel.dataset_file_path.isEmpty || fineTuneModel.dataset_file_path == "Select dataset") ? "my-dataset.txt" : fineTuneModel.dataset_file_path\n                        datasetEditorText = ""\n                        showDatasetEditor = true\n                    } label: {\n                        Label("New dataset (paste text)...", systemImage: "square.and.pencil")\n                    }\n\n                    Section("Avalible datasets") {\n', "editor entry", "New dataset (paste text)")
+          patch(p, '    var body: some View {\n        VStack(alignment: .leading){\n', '    func saveDataset() {\n        var name = datasetEditorName.trimmingCharacters(in: .whitespacesAndNewlines)\n        if name.isEmpty { name = "my-dataset.txt" }\n        if !name.hasSuffix(".txt") { name += ".txt" }\n        let fm = FileManager.default\n        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }\n        let dir = docs.appendingPathComponent("datasets")\n        try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)\n        try? datasetEditorText.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)\n        datasets_preview = getFileListByExts(dir: "datasets", exts: [".txt"]) ?? []\n        fineTuneModel.dataset_file_path = name\n        showDatasetEditor = false\n    }\n\n    var body: some View {\n        VStack(alignment: .leading){\n', "save function", "func saveDataset()")
+          patch(p, '        .navigationTitle("FineTune")\n        .disabled(fineTuneModel.state == .cancel)\n    }\n', '        .navigationTitle("FineTune")\n        .disabled(fineTuneModel.state == .cancel)\n        .sheet(isPresented: $showDatasetEditor) {\n            NavigationStack {\n                VStack(alignment: .leading, spacing: 10) {\n                    Text("Dataset file name:").font(.caption).foregroundColor(.secondary)\n                    TextField("my-dataset.txt", text: $datasetEditorName).textFieldStyle(.roundedBorder)\n                    Text("Training text (one sample per line):").font(.caption).foregroundColor(.secondary)\n                    TextEditor(text: $datasetEditorText)\n                        .frame(minHeight: 280)\n                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.5)))\n                    Spacer()\n                }\n                .padding()\n                .navigationTitle("New Dataset")\n                .toolbar {\n                    ToolbarItem(placement: .navigationBarLeading) { Button("Cancel") { showDatasetEditor = false } }\n                    ToolbarItem(placement: .navigationBarTrailing) { Button("Save") { saveDataset() } }\n                }\n            }\n        }\n    }\n', "editor sheet", ".sheet(isPresented:")
+          print("ALL DONE")
+          PYEOF
+          python3 /tmp/patch_all.py
       - run: |
           xcodebuild archive \
             -project LLMFarm.xcodeproj \
