@@ -25,6 +25,25 @@ jobs:
           cp -R "$SRC" "$DST"
           echo "已准备 $DST"
 
+      # Xcode 16 要求每个 App Shortcut 短语必须包含 \(.applicationName)，
+      # 老版本源码的 "Ask Local LLM" 缺少该占位符会导致元数据提取失败。
+      - name: Fix App Shortcut utterance
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          p = "LLMFarm/Intents/LLMFarmShortcuts.swift"
+          s = open(p, encoding="utf-8").read()
+          old = '"Ask Local LLM"'
+          new = '"Ask Local LLM in \\(.applicationName)"'
+          if old in s:
+              open(p, "w", encoding="utf-8").write(s.replace(old, new))
+              print("patched App Shortcuts phrase")
+          elif new in s:
+              print("already patched")
+          else:
+              raise SystemExit("App Shortcut phrase not found")
+          PY
+
       - run: |
           xcodebuild archive \
             -project LLMFarm.xcodeproj \
